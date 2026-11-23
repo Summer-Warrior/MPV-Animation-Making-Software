@@ -1,0 +1,24 @@
+<resources>
+    <string name="app_name">ChronoStage AI</string>
+    <string name="studio_subtitle">Hybrid 2D Sprite &amp; 3D Console Animation Engine</string>
+    <string name="tab_stage">Stage &amp; Timeline</string>
+    <string name="tab_ai_director">Doc-to-Show AI</string>
+    <string name="tab_consoles">Consoles &amp; Handhelds</string>
+    <string name="tab_assets">3D &amp; Sprite Lab</string>
+    <string name="tab_shows">Saved Shows</string>
+    <string name="btn_generate_show">Convert Documentation to Animated Show</string>
+    <string name="btn_polish_script">Stream AI Director Notes</string>
+    <string name="btn_generate_texture">Synthesize AI Texture / Sprite (Nano Banana)</string>
+    <string name="btn_play_show">Play Show</string>
+    <string name="btn_pause_show">Pause Show</string>
+    <string name="btn_broadcast_mode">Broadcast Cinema</string>
+    <string name="btn_save_show">Save Show Project</string>
+    <string name="cd_studio_banner">ChronoStage AI Hybrid 2D and 3D Studio Banner</string>
+    <string name="cd_play_pause">Toggle animation show playback</string>
+    <string name="cd_prev_scene">Previous scene</string>
+    <string name="cd_next_scene">Next scene</string>
+    <string name="cd_wireframe_toggle">Toggle 3D wireframe overlay</string>
+    <string name="cd_crt_toggle">Toggle console CRT and handheld LCD filter</string>
+    <string name="cd_camera_reset">Reset 3D camera orbit</string>
+    <string name="cd_broadcast_fullscreen">Toggle full-screen broadcast show mode</string>
+</resources>

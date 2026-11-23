@@ -1,0 +1,6 @@
+{
+  "name": "ChronoStage AI",
+  "description": "AI animation studio and hybrid 2D/3D rendering engine that transforms text documentation into online show animations mixing sprites, 3D models, and textures across classic and modern video game consoles and handhelds.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
