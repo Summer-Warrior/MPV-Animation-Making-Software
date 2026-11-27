@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.MovieFilter
 import androidx.compose.material.icons.filled.PlayCircleFilled
 import androidx.compose.material3.Button
@@ -29,14 +30,23 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -49,15 +59,19 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.ai.OmniAiConfig
 import com.example.data.StarterShowPresets
 import com.example.model.ConsoleHardwareCatalog
 import com.example.viewmodel.DirectorStreamState
 import com.example.viewmodel.DocToShowUiState
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AiDocDirectorTab(
     documentationInput: String,
     preferredTargetConsoleId: String?,
+    omniAiConfig: OmniAiConfig,
+    enabledContextSourcesCount: Int,
     docToShowState: DocToShowUiState,
     directorStreamState: DirectorStreamState,
     onUpdateDocumentation: (String) -> Unit,
@@ -65,8 +79,19 @@ fun AiDocDirectorTab(
     onGenerateShow: () -> Unit,
     onStreamDirectorNotes: () -> Unit,
     onOpenStageTab: () -> Unit,
+    onOpenAiHub: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var consoleDropdownExpanded by remember { mutableStateOf(false) }
+    val selectedConsoleLabel = remember(preferredTargetConsoleId) {
+        if (preferredTargetConsoleId == null) {
+            "Multi-Console Mix (Auto per Scene)"
+        } else {
+            val spec = ConsoleHardwareCatalog.findById(preferredTargetConsoleId)
+            "${spec.name} (${spec.releaseYear} • ${spec.formFactor.label})"
+        }
+    }
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -74,12 +99,12 @@ fun AiDocDirectorTab(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // 1. Studio Hero Banner Card
+        // 1. Studio Hero Banner Card + Compact AI Hub Launcher
         item {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(148.dp)
+                    .height(158.dp)
                     .clip(RoundedCornerShape(18.dp))
                     .border(
                         width = 1.dp,
@@ -99,21 +124,51 @@ fun AiDocDirectorTab(
                         .background(
                             Brush.verticalGradient(
                                 colors = listOf(
-                                    Color(0x33070A12),
-                                    Color(0xE6070A12)
+                                    Color(0x44070A12),
+                                    Color(0xEB070A12)
                                 )
                             )
                         )
-                        .padding(14.dp),
-                    contentAlignment = Alignment.BottomStart
+                        .padding(14.dp)
                 ) {
-                    Column {
+                    // Compact AI Hub button in top-right of banner
+                    Button(
+                        onClick = onOpenAiHub,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xDD171F36),
+                            contentColor = MaterialTheme.colorScheme.primary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .border(
+                                1.dp,
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+                                RoundedCornerShape(10.dp)
+                            )
+                            .testTag("open_ai_hub_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Hub,
+                            contentDescription = stringResource(R.string.cd_ai_hub),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "${stringResource(R.string.btn_ai_hub)} (${enabledContextSourcesCount})",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Column(modifier = Modifier.align(Alignment.BottomStart)) {
                         Surface(
                             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
                             shape = RoundedCornerShape(6.dp)
                         ) {
                             Text(
-                                text = "FIREBASE AI LOGIC • GEMINI 3.8 FLASH DIRECTOR",
+                                text = "TEXT: ${omniAiConfig.activeTextProvider.shortBadge.uppercase()} • IMG: ${omniAiConfig.activeImageProvider.shortBadge.uppercase()}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
@@ -127,7 +182,7 @@ fun AiDocDirectorTab(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Transforms technical docs, scripts & patch notes into multi-scene 3D + 2D sprite online shows.",
+                            text = "Transforms docs, SAF files, HTTPS specs & notes into multi-scene 3D + 2D sprite shows.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = Color(0xFFD0DCFF)
                         )
@@ -177,15 +232,58 @@ fun AiDocDirectorTab(
             }
         }
 
-        // 3. Target Console / Handheld Profile Selector for AI Show Generation
+        // 3. Target Console / Handheld Dropdown Menu + Quick Chips
         item {
-            Column {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "TARGET CONSOLE / HANDHELD ERA FOR AI SCENES",
+                    text = "TARGET RETRO OR MODERN CONSOLE STYLE",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(6.dp))
+
+                ExposedDropdownMenuBox(
+                    expanded = consoleDropdownExpanded,
+                    onExpandedChange = { consoleDropdownExpanded = !consoleDropdownExpanded },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedTextField(
+                        value = selectedConsoleLabel,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text(stringResource(R.string.label_console_dropdown)) },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(expanded = consoleDropdownExpanded)
+                        },
+                        modifier = Modifier
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                            .fillMaxWidth()
+                            .testTag("target_console_dropdown")
+                    )
+                    ExposedDropdownMenu(
+                        expanded = consoleDropdownExpanded,
+                        onDismissRequest = { consoleDropdownExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Multi-Console Mix (Auto per Scene)") },
+                            onClick = {
+                                onSelectPreferredConsole(null)
+                                consoleDropdownExpanded = false
+                            }
+                        )
+                        ConsoleHardwareCatalog.allConsoles.forEach { spec ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text("${spec.name} (${spec.releaseYear} • ${spec.shortCode})")
+                                },
+                                onClick = {
+                                    onSelectPreferredConsole(spec.id)
+                                    consoleDropdownExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -195,14 +293,14 @@ fun AiDocDirectorTab(
                     FilterChip(
                         selected = preferredTargetConsoleId == null,
                         onClick = { onSelectPreferredConsole(null) },
-                        label = { Text("Multi-Console Mix (Recommended)") },
+                        label = { Text("Multi-Console Mix") },
                         modifier = Modifier.testTag("ai_target_console_mix")
                     )
                     ConsoleHardwareCatalog.allConsoles.forEach { spec ->
                         FilterChip(
                             selected = preferredTargetConsoleId == spec.id,
                             onClick = { onSelectPreferredConsole(spec.id) },
-                            label = { Text("${spec.name} (${spec.releaseYear})") },
+                            label = { Text("${spec.shortCode} (${spec.releaseYear})") },
                             modifier = Modifier.testTag("ai_target_console_${spec.id}")
                         )
                     }
@@ -367,7 +465,7 @@ fun AiDocDirectorTab(
                         ) {
                             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                             Spacer(modifier = Modifier.width(12.dp))
-                            Text("Connecting to Gemini 3.8 Flash stream...")
+                            Text("Connecting to ${omniAiConfig.activeTextProvider.displayName}...")
                         }
                     }
                 }

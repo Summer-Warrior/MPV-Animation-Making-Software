@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Pause
@@ -91,6 +92,7 @@ fun StageAndTimelineTab(
     onSelectConsoleOverride: (String?) -> Unit,
     onEnterBroadcastFullscreen: () -> Unit,
     onSaveShowProject: () -> Unit,
+    onExportMarkdown: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
@@ -122,21 +124,39 @@ fun StageAndTimelineTab(
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                OutlinedButton(
-                    onClick = onSaveShowProject,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    modifier = Modifier.testTag("save_show_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.BookmarkAdd,
-                        contentDescription = stringResource(R.string.btn_save_show),
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Save",
-                        style = MaterialTheme.typography.labelLarge
-                    )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedButton(
+                        onClick = onExportMarkdown,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("export_markdown_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = stringResource(R.string.cd_export_markdown),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = stringResource(R.string.btn_export_markdown),
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = onSaveShowProject,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("save_show_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.BookmarkAdd,
+                            contentDescription = stringResource(R.string.btn_save_show),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Save",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
                 }
             }
         }

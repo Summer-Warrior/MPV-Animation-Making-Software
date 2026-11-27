@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.VideoLibrary
@@ -44,6 +45,7 @@ fun SavedShowsLibraryTab(
     activeShowId: Long,
     onLoadShow: (ShowProject) -> Unit,
     onDeleteShow: (Long) -> Unit,
+    onExportShowMarkdown: (ShowProject) -> Unit,
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
@@ -121,16 +123,28 @@ fun SavedShowsLibraryTab(
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
-                        if (savedShows.size > 1) {
+                        Row {
                             IconButton(
-                                onClick = { onDeleteShow(show.id) },
-                                modifier = Modifier.testTag("delete_show_${show.id}")
+                                onClick = { onExportShowMarkdown(show) },
+                                modifier = Modifier.testTag("export_show_md_${show.id}")
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.DeleteOutline,
-                                    contentDescription = "Delete Show Project",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = "Copy Show Markdown",
+                                    tint = MaterialTheme.colorScheme.primary
                                 )
+                            }
+                            if (savedShows.size > 1) {
+                                IconButton(
+                                    onClick = { onDeleteShow(show.id) },
+                                    modifier = Modifier.testTag("delete_show_${show.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "Delete Show Project",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }

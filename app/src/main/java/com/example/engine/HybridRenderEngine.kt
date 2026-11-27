@@ -82,6 +82,24 @@ private sealed interface RenderPrimitive {
     ) : RenderPrimitive
 }
 
+/**
+ * Snaps a screen-space coordinate to the active console's pixel grid or integer vertex snap step.
+ * When `pixelGridScale <= 1` and `vertexSnapStrength <= 0.5f`, coordinates remain razor sharp.
+ */
+fun snapToPixelGrid(
+    value: Float,
+    pixelGridScale: Int,
+    vertexSnapStrength: Float = 0f
+): Float {
+    val gridStep = if (pixelGridScale > 1) pixelGridScale.toFloat() else 0f
+    val effectiveSnap = maxOf(vertexSnapStrength, gridStep)
+    return if (effectiveSnap > 0.5f) {
+        (value / effectiveSnap).roundToInt() * effectiveSnap
+    } else {
+        value
+    }
+}
+
 @Composable
 fun ChronoStageViewport(
     scene: ShowScene,
@@ -206,16 +224,11 @@ fun ChronoStageViewport(
                     val pz = (camDist - tv.z).coerceAtLeast(0.6f)
                     val sx = w * 0.5f + (tv.x / pz) * fovScale
                     val sy = h * 0.50f - (tv.y / pz) * fovScale
-                    // Apply PS1/Saturn/Handheld integer vertex snapping when configured
-                    val snap = consoleSpec.vertexSnapStrength
-                    if (snap > 0.5f) {
-                        Offset(
-                            (sx / snap).roundToInt() * snap,
-                            (sy / snap).roundToInt() * snap
-                        )
-                    } else {
-                        Offset(sx, sy)
-                    }
+                    // Apply PS1/Saturn vertex snapping AND console pixelGridScale quantization
+                    Offset(
+                        snapToPixelGrid(sx, consoleSpec.pixelGridScale, consoleSpec.vertexSnapStrength),
+                        snapToPixelGrid(sy, consoleSpec.pixelGridScale, consoleSpec.vertexSnapStrength)
+                    )
                 }
 
                 val baseColor = resolveRoleColor(
@@ -785,11 +798,18 @@ private fun DrawScope.draw2DSpriteBillboard(
     timeSec: Float
 ) {
     val grid = PixelSpriteBank.getSpriteFrame(sprite.actor, sprite.frameIndex)
-    val pixelSize = sprite.scaleFactor.coerceIn(2.5f, 11f)
+    val gridScale = consoleSpec.pixelGridScale.coerceAtLeast(1)
+    val rawPixelSize = sprite.scaleFactor.coerceIn(2.5f, 11f)
+    // Quantize 2D sprite pixel blocks to multiples of pixelGridScale on retro/handheld consoles
+    val pixelSize = if (gridScale > 1) {
+        ((rawPixelSize / gridScale).roundToInt().coerceAtLeast(1) * gridScale).toFloat()
+    } else {
+        rawPixelSize
+    }
     val totalW = 12 * pixelSize
     val totalH = 12 * pixelSize
-    val startX = sprite.screenCenter.x - totalW * 0.5f
-    val startY = sprite.screenCenter.y - totalH * 0.5f
+    val startX = snapToPixelGrid(sprite.screenCenter.x - totalW * 0.5f, gridScale)
+    val startY = snapToPixelGrid(sprite.screenCenter.y - totalH * 0.5f, gridScale)
 
     // Ground shadow oval under the 2D sprite billboard
     drawOval(
@@ -808,6 +828,7 @@ private fun DrawScope.draw2DSpriteBillboard(
         Color(0xFFFFF8E1)
     }
 
+    val pixelOverlap = if (gridScale > 1) 0f else 0.6f
     for (rowIdx in grid.indices) {
         val rowStr = grid[rowIdx]
         for (colIdx in rowStr.indices) {
@@ -820,10 +841,12 @@ private fun DrawScope.draw2DSpriteBillboard(
                 '4' -> c4
                 else -> c1
             }
+            val px = snapToPixelGrid(startX + colIdx * pixelSize, gridScale)
+            val py = snapToPixelGrid(startY + rowIdx * pixelSize, gridScale)
             drawRect(
                 color = color,
-                topLeft = Offset(startX + colIdx * pixelSize, startY + rowIdx * pixelSize),
-                size = Size(pixelSize + 0.6f, pixelSize + 0.6f)
+                topLeft = Offset(px, py),
+                size = Size(pixelSize + pixelOverlap, pixelSize + pixelOverlap)
             )
         }
     }
@@ -832,7 +855,10 @@ private fun DrawScope.draw2DSpriteBillboard(
     if (sprite.isPrimary && sin(timeSec * 3f) > -0.6f) {
         drawRect(
             color = consoleSpec.accentColor.copy(alpha = 0.85f),
-            topLeft = Offset(sprite.screenCenter.x - pixelSize * 3f, startY - pixelSize * 2.2f),
+            topLeft = Offset(
+                snapToPixelGrid(sprite.screenCenter.x - pixelSize * 3f, gridScale),
+                snapToPixelGrid(startY - pixelSize * 2.2f, gridScale)
+            ),
             size = Size(pixelSize * 6f, pixelSize * 1.1f)
         )
     }

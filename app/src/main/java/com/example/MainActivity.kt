@@ -1,5 +1,8 @@
 package com.example
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -47,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -63,11 +67,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ai.MultiSourceContextRegistry
+import com.example.ai.OmniAiRouter
+import com.example.ai.SecureAiKeyVault
 import com.example.appcheck.configureAppCheck
 import com.example.data.ShowDatabase
 import com.example.data.ShowRepository
+import com.example.data.ShowTextureStore
 import com.example.engine.ChronoStageViewport
 import com.example.model.ConsoleHardwareCatalog
+import com.example.model.ShowProject
+import com.example.ui.components.OmniAiConnectionsSheet
 import com.example.ui.screens.AiDocDirectorTab
 import com.example.ui.screens.AssetAndTextureLabTab
 import com.example.ui.screens.ConsolesAndHandheldsTab
@@ -115,13 +125,21 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ChronoStageApp() {
     val context = LocalContext.current
-    val repository = remember {
+    val dependencies = remember {
         val db = ShowDatabase.getInstance(context)
-        ShowRepository(db.showDao())
+        val textureStore = ShowTextureStore(context)
+        val repository = ShowRepository(db.showDao(), textureStore)
+        val keyVault = SecureAiKeyVault(context)
+        val contextRegistry = MultiSourceContextRegistry(context)
+        val omniAiRouter = OmniAiRouter(keyVault)
+        ChronoStageViewModel.provideFactory(
+            repository = repository,
+            keyVault = keyVault,
+            contextRegistry = contextRegistry,
+            omniAiRouter = omniAiRouter
+        )
     }
-    val viewModel: ChronoStageViewModel = viewModel(
-        factory = ChronoStageViewModel.provideFactory(repository)
-    )
+    val viewModel: ChronoStageViewModel = viewModel(factory = dependencies)
 
     val activeShow by viewModel.activeShow.collectAsStateWithLifecycle()
     val selectedSceneIndex by viewModel.selectedSceneIndex.collectAsStateWithLifecycle()
@@ -142,6 +160,10 @@ fun ChronoStageApp() {
     val textureGenState by viewModel.textureGenState.collectAsStateWithLifecycle()
     val aiCustomBitmap by viewModel.aiCustomBitmap.collectAsStateWithLifecycle()
     val savedShows by viewModel.savedShows.collectAsStateWithLifecycle()
+    val omniAiConfig by viewModel.omniAiConfig.collectAsStateWithLifecycle()
+    val contextSources by viewModel.contextSources.collectAsStateWithLifecycle()
+    val hubStatusMessage by viewModel.hubStatusMessage.collectAsStateWithLifecycle()
+    val isHubBusy by viewModel.isHubBusy.collectAsStateWithLifecycle()
 
     val currentScene = remember(activeShow, selectedSceneIndex) {
         val list = activeShow.scenes
@@ -153,8 +175,18 @@ fun ChronoStageApp() {
     }
 
     var currentTabIndex by rememberSaveable { mutableIntStateOf(0) }
+    var showAiHubSheet by rememberSaveable { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    fun copyShowMarkdownToClipboard(project: ShowProject) {
+        val markdown = viewModel.exportShowMarkdown(project)
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        clipboard?.setPrimaryClip(ClipData.newPlainText("${project.title} Storyboard", markdown))
+        scope.launch {
+            snackbarHostState.showSnackbar("Copied '${project.title}' Markdown for Google Docs / Notebook!")
+        }
+    }
 
     // Fullscreen Broadcast Cinema Mode
     if (isBroadcastFullscreen) {
@@ -266,20 +298,24 @@ fun ChronoStageApp() {
                                 scope.launch {
                                     snackbarHostState.showSnackbar("Saved '${activeShow.title}' to Show Archive!")
                                 }
-                            }
+                            },
+                            onExportMarkdown = { copyShowMarkdownToClipboard(activeShow) }
                         )
                     }
                     StudioDestination.AI_DIRECTOR -> {
                         AiDocDirectorTab(
                             documentationInput = documentationInput,
                             preferredTargetConsoleId = preferredTargetConsoleId,
+                            omniAiConfig = omniAiConfig,
+                            enabledContextSourcesCount = contextSources.count { it.enabled },
                             docToShowState = docToShowState,
                             directorStreamState = directorStreamState,
                             onUpdateDocumentation = viewModel::updateDocumentationInput,
                             onSelectPreferredConsole = viewModel::setPreferredTargetConsoleId,
                             onGenerateShow = viewModel::generateAnimatedShowFromDocumentation,
                             onStreamDirectorNotes = viewModel::streamAiDirectorNotes,
-                            onOpenStageTab = { currentTabIndex = StudioDestination.STAGE.ordinal }
+                            onOpenStageTab = { currentTabIndex = StudioDestination.STAGE.ordinal },
+                            onOpenAiHub = { showAiHubSheet = true }
                         )
                     }
                     StudioDestination.CONSOLES -> {
@@ -312,12 +348,35 @@ fun ChronoStageApp() {
                                 viewModel.selectShowProject(show)
                                 currentTabIndex = StudioDestination.STAGE.ordinal
                             },
-                            onDeleteShow = viewModel::deleteSavedShow
+                            onDeleteShow = viewModel::deleteSavedShow,
+                            onExportShowMarkdown = ::copyShowMarkdownToClipboard
                         )
                     }
                 }
             }
         }
+    }
+
+    if (showAiHubSheet) {
+        OmniAiConnectionsSheet(
+            config = omniAiConfig,
+            contextSources = contextSources,
+            hubStatusMessage = hubStatusMessage,
+            isHubBusy = isHubBusy,
+            onDismiss = { showAiHubSheet = false },
+            onSelectTextProvider = viewModel::selectActiveTextProvider,
+            onSelectImageProvider = viewModel::selectActiveImageProvider,
+            onToggleFirebaseFallback = viewModel::toggleFirebaseFallback,
+            onSaveProviderKey = viewModel::saveProviderKey,
+            onClearProviderKey = viewModel::clearProviderKey,
+            onUpdateProviderModelAndUrl = viewModel::updateProviderModelAndUrl,
+            onStartOpenRouterPkce = viewModel::startOpenRouterPkce,
+            onImportSafDocument = { uri -> viewModel.importSafDocument(context, uri) },
+            onAddHttpsSource = viewModel::addHttpsContextSource,
+            onAddNoteSource = viewModel::addNoteContextSource,
+            onToggleSourceEnabled = viewModel::toggleContextSource,
+            onRemoveSource = viewModel::removeContextSource
+        )
     }
 }
 

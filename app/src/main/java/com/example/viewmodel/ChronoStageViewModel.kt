@@ -1,12 +1,24 @@
 package com.example.viewmodel
 
+import android.content.Context
 import android.graphics.Bitmap
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.ai.AiImageRequest
+import com.example.ai.AiProviderId
+import com.example.ai.AiTextRequest
+import com.example.ai.ContextSourceItem
+import com.example.ai.MultiSourceContextRegistry
+import com.example.ai.OmniAiConfig
+import com.example.ai.OmniAiRouter
+import com.example.ai.OpenRouterPkceHelper
+import com.example.ai.SecureAiKeyVault
+import com.example.data.ShowMarkdownExporter
 import com.example.data.ShowRepository
 import com.example.data.StarterShowPresets
 import com.example.model.AnimationMotion
@@ -19,12 +31,7 @@ import com.example.model.ShowProject
 import com.example.model.ShowScene
 import com.example.model.SpriteActorType
 import com.example.model.TexturePreset
-import com.google.firebase.Firebase
-import com.google.firebase.ai.ai
-import com.google.firebase.ai.type.ImagePart
-import com.google.firebase.ai.type.ResponseModality
 import com.google.firebase.ai.type.Schema
-import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
@@ -62,10 +69,13 @@ sealed interface TextureGenUiState {
 }
 
 class ChronoStageViewModel(
-    private val repository: ShowRepository
+    private val repository: ShowRepository,
+    private val keyVault: SecureAiKeyVault,
+    private val contextRegistry: MultiSourceContextRegistry,
+    private val omniAiRouter: OmniAiRouter
 ) : ViewModel() {
 
-    // Structured JSON schema for converting documentation into a multi-scene animated online show
+    // Structured JSON schema for Firebase AI Logic Gemini 3.8 Flash show generation
     private val showGenerationSchema by lazy {
         val sceneSchema = Schema.obj(
             properties = mapOf(
@@ -120,38 +130,23 @@ class ChronoStageViewModel(
         )
     }
 
-    // 1. Lazy initialization of Structured JSON Gemini 3.8 Flash model
-    private val structuredShowModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = showGenerationSchema
-            }
-        )
-    }
-
-    // 2. Lazy initialization of Streaming Gemini 3.8 Flash model for Director Notes
-    private val directorStreamModel by lazy {
-        Firebase.ai.generativeModel("gemini-3.8-flash")
-    }
-
-    // 3. Lazy initialization of Gemini Nano Banana 2.1 model for runtime AI Texture / Sprite generation
-    private val nanoBananaImageModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-nano-banana-2.1",
-            generationConfig = generationConfig {
-                responseModalities = listOf(ResponseModality.IMAGE)
-            }
-        )
-    }
-
     val savedShows: StateFlow<List<ShowProject>> = repository.allShows
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = StarterShowPresets.defaultShowProjects
         )
+
+    val contextSources: StateFlow<List<ContextSourceItem>> = contextRegistry.sources
+
+    private val _omniAiConfig = MutableStateFlow(keyVault.loadConfig())
+    val omniAiConfig: StateFlow<OmniAiConfig> = _omniAiConfig.asStateFlow()
+
+    private val _hubStatusMessage = MutableStateFlow<String?>(null)
+    val hubStatusMessage: StateFlow<String?> = _hubStatusMessage.asStateFlow()
+
+    private val _isHubBusy = MutableStateFlow(false)
+    val isHubBusy: StateFlow<Boolean> = _isHubBusy.asStateFlow()
 
     private val _activeShow = MutableStateFlow(StarterShowPresets.defaultShowProjects.first())
     val activeShow: StateFlow<ShowProject> = _activeShow.asStateFlow()
@@ -214,6 +209,8 @@ class ChronoStageViewModel(
     init {
         viewModelScope.launch {
             repository.ensureSeeded()
+            // Reload persisted AI custom texture for the initial show if present on disk
+            loadPersistedTextureForShow(_activeShow.value.id)
         }
         // Automatic multi-scene show sequencer loop
         viewModelScope.launch {
@@ -238,6 +235,18 @@ class ChronoStageViewModel(
         }
     }
 
+    private fun loadPersistedTextureForShow(showId: Long) {
+        viewModelScope.launch {
+            val loaded = repository.loadShowTexture(showId)
+            _aiCustomBitmap.value = loaded
+            if (loaded != null) {
+                _textureGenState.value = TextureGenUiState.Success(loaded, "Loaded from saved show archive")
+            } else {
+                _textureGenState.value = TextureGenUiState.Idle
+            }
+        }
+    }
+
     fun getCurrentScene(): ShowScene {
         val scenes = _activeShow.value.scenes
         if (scenes.isEmpty()) return StarterShowPresets.defaultShowProjects.first().scenes.first()
@@ -255,6 +264,7 @@ class ChronoStageViewModel(
         _selectedSceneIndex.value = 0
         _sceneProgressFloat.value = 0f
         _documentationInput.value = project.sourceDocumentation
+        loadPersistedTextureForShow(project.id)
     }
 
     fun selectScene(index: Int) {
@@ -338,7 +348,7 @@ class ChronoStageViewModel(
 
     fun saveActiveShowToLibrary() {
         viewModelScope.launch {
-            val savedId = repository.saveShow(_activeShow.value)
+            val savedId = repository.saveShow(_activeShow.value, _aiCustomBitmap.value)
             _activeShow.value = _activeShow.value.copy(id = savedId)
         }
     }
@@ -346,11 +356,162 @@ class ChronoStageViewModel(
     fun deleteSavedShow(id: Long) {
         viewModelScope.launch {
             repository.deleteShow(id)
+            if (_activeShow.value.id == id) {
+                _aiCustomBitmap.value = null
+            }
+        }
+    }
+
+    fun exportShowMarkdown(project: ShowProject = _activeShow.value): String {
+        return ShowMarkdownExporter.exportShowToMarkdown(project)
+    }
+
+    // --- Multi-AI + Multi-Source Hub Controls ---
+
+    fun selectActiveTextProvider(provider: AiProviderId) {
+        val updated = _omniAiConfig.value.copy(activeTextProvider = provider)
+        keyVault.saveConfig(updated)
+        _omniAiConfig.value = keyVault.loadConfig()
+        _hubStatusMessage.value = "Text & Show Scripting routed to ${provider.displayName}"
+    }
+
+    fun selectActiveImageProvider(provider: AiProviderId) {
+        if (!provider.supportsImage) return
+        val updated = _omniAiConfig.value.copy(activeImageProvider = provider)
+        keyVault.saveConfig(updated)
+        _omniAiConfig.value = keyVault.loadConfig()
+        _hubStatusMessage.value = "Image & Texture Synthesis routed to ${provider.displayName}"
+    }
+
+    fun toggleFirebaseFallback(enabled: Boolean) {
+        val updated = _omniAiConfig.value.copy(enableFirebaseFallback = enabled)
+        keyVault.saveConfig(updated)
+        _omniAiConfig.value = keyVault.loadConfig()
+    }
+
+    fun saveProviderKey(provider: AiProviderId, rawKey: String) {
+        keyVault.saveApiKey(provider, rawKey)
+        _omniAiConfig.value = keyVault.loadConfig()
+        _hubStatusMessage.value = "Saved encrypted API key for ${provider.shortBadge}."
+    }
+
+    fun clearProviderKey(provider: AiProviderId) {
+        keyVault.clearApiKey(provider)
+        _omniAiConfig.value = keyVault.loadConfig()
+        _hubStatusMessage.value = "Cleared API key for ${provider.shortBadge}."
+    }
+
+    fun updateProviderModelAndUrl(
+        provider: AiProviderId,
+        textModel: String,
+        imageModel: String,
+        baseUrl: String
+    ) {
+        val current = _omniAiConfig.value
+        val existing = current.settingsFor(provider)
+        val updatedSettings = existing.copy(
+            textModel = textModel.trim().ifBlank { provider.defaultTextModel },
+            imageModel = imageModel.trim().ifBlank { provider.defaultImageModel.orEmpty() },
+            baseUrl = baseUrl.trim().ifBlank { provider.defaultBaseUrl }
+        )
+        val updated = current.copy(
+            providers = current.providers + (provider to updatedSettings)
+        )
+        keyVault.saveConfig(updated)
+        _omniAiConfig.value = keyVault.loadConfig()
+        _hubStatusMessage.value = "Updated ${provider.shortBadge} model and endpoint settings."
+    }
+
+    fun startOpenRouterPkce(onLaunchUrl: (String) -> Unit) {
+        viewModelScope.launch {
+            _isHubBusy.value = true
+            _hubStatusMessage.value = "Waiting for OpenRouter OAuth callback on 127.0.0.1..."
+            try {
+                val apiKey = OpenRouterPkceHelper.runLoopbackPkceFlow(
+                    httpClient = OmniAiRouter.defaultRouterHttpClient(),
+                    onLaunchBrowser = { session -> onLaunchUrl(session.authorizationUrl) }
+                )
+                keyVault.saveApiKey(AiProviderId.OPENROUTER, apiKey)
+                val updated = _omniAiConfig.value.copy(activeTextProvider = AiProviderId.OPENROUTER)
+                keyVault.saveConfig(updated)
+                _omniAiConfig.value = keyVault.loadConfig()
+                _hubStatusMessage.value = "Connected OpenRouter via PKCE OAuth!"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "OpenRouter PKCE flow failed", e)
+                _hubStatusMessage.value = "OpenRouter PKCE error: ${e.localizedMessage ?: "Failed"}"
+            } finally {
+                _isHubBusy.value = false
+            }
+        }
+    }
+
+    fun importSafDocument(context: Context, uri: Uri) {
+        viewModelScope.launch {
+            _isHubBusy.value = true
+            try {
+                val item = contextRegistry.importSafDocument(context, uri)
+                _hubStatusMessage.value = "Imported '${item.title}' (${item.content.length} chars)."
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "SAF import failed", e)
+                _hubStatusMessage.value = "Import error: ${e.localizedMessage ?: "Unsupported file"}"
+            } finally {
+                _isHubBusy.value = false
+            }
+        }
+    }
+
+    fun addHttpsContextSource(rawUrl: String, titleOverride: String) {
+        viewModelScope.launch {
+            _isHubBusy.value = true
+            _hubStatusMessage.value = "Validating and fetching HTTPS source..."
+            try {
+                val item = contextRegistry.addAndFetchHttpsSource(rawUrl, titleOverride)
+                _hubStatusMessage.value = "Attached HTTPS source '${item.title}'."
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "HTTPS source fetch failed", e)
+                _hubStatusMessage.value = "URL error: ${e.localizedMessage ?: "Blocked or unreachable"}"
+            } finally {
+                _isHubBusy.value = false
+            }
+        }
+    }
+
+    fun addNoteContextSource(title: String, body: String) {
+        runCatching {
+            val item = contextRegistry.addNoteSource(title, body)
+            _hubStatusMessage.value = "Added note '${item.title}' to Context Hub."
+        }.onFailure { e ->
+            _hubStatusMessage.value = e.localizedMessage ?: "Unable to add note."
+        }
+    }
+
+    fun toggleContextSource(id: String) {
+        contextRegistry.toggleSourceEnabled(id)
+    }
+
+    fun removeContextSource(id: String) {
+        contextRegistry.removeSource(id)
+    }
+
+    private fun buildLiveShowContextSummary(): String {
+        val show = _activeShow.value
+        val activeScene = getCurrentScene()
+        val activeConsole = getEffectiveConsoleSpec(activeScene)
+        return buildString {
+            appendLine("Current Show: ${show.title} (${show.scenes.size} scenes)")
+            appendLine("Active Stage Scene: ${activeScene.title} | Console: ${activeConsole.name} (${activeConsole.shortCode})")
+            appendLine("Active Assets: 3D=${activeScene.model3D.displayName}, Sprites=${activeScene.primarySprite.displayName} & ${activeScene.secondarySprite.displayName}, Texture=${activeScene.texturePreset.displayName}")
         }
     }
 
     /**
-     * AI Documentation-to-Animation Show Generator (Structured JSON via Gemini 3.8 Flash)
+     * AI Documentation-to-Animation Show Generator routed via OmniAiRouter + MultiSourceContextRegistry.
      */
     fun generateAnimatedShowFromDocumentation() {
         val docText = _documentationInput.value.trim()
@@ -362,27 +523,63 @@ class ChronoStageViewModel(
         val consoleConstraint = _preferredTargetConsoleId.value?.let { id ->
             val spec = ConsoleHardwareCatalog.findById(id)
             "Prioritize using consoleId '${spec.id}' (${spec.name}) for the primary scenes, or blend it with complementary consoles/handhelds."
-        } ?: "Use a rich variety of classic and modern home consoles and handhelds across the scenes (e.g. gameboy_dmg, snes_superfx, ps1_saturn, nintendo_64, gba_advance, nintendo_ds, psp_vita_3ds, switch_deck_hd2d)."
+        } ?: "Use a rich variety of classic and modern home consoles and handhelds across the scenes."
 
-        val prompt = """
+        val validConsoles = ConsoleHardwareCatalog.allConsoles.joinToString(", ") { it.id }
+        val validModels = Model3DType.entries.joinToString(", ") { it.id }
+        val validMotions = AnimationMotion.entries.joinToString(", ") { it.id }
+        val validTextures = TexturePreset.entries.joinToString(", ") { it.id }
+        val validSprites = SpriteActorType.entries.joinToString(", ") { it.id }
+        val validCameras = CameraMove.entries.joinToString(", ") { it.id }
+        val validFx = ParticleFxType.entries.joinToString(", ") { it.id }
+
+        val contextBlock = contextRegistry.assembleContextBlock(
+            liveShowContext = buildLiveShowContextSummary()
+        )
+
+        val systemPrompt = """
             You are the AI Showrunner and Technical Animation Director for ChronoStage AI.
-            Convert the following text documentation into an exciting 4-scene animated online show that mixes 3D models, 2D pixel sprites, surface textures, and authentic video game console & handheld rendering pipelines.
-            $consoleConstraint
-
-            Documentation Input:
-            $docText
+            Return ONLY valid raw JSON matching this exact shape:
+            {"showTitle":"...","showSubtitle":"...","scenes":[{"title":"...","documentationExcerpt":"...","narratorScript":"...","consoleId":"...","model3D":"...","modelMotion":"...","texturePreset":"...","primarySprite":"...","secondarySprite":"...","cameraMove":"...","particleFx":"...","durationSeconds":7}]}
+            Allowed enum values:
+            - consoleId: $validConsoles
+            - model3D: $validModels
+            - modelMotion: $validMotions
+            - texturePreset: $validTextures
+            - primarySprite / secondarySprite: $validSprites
+            - cameraMove: $validCameras
+            - particleFx: $validFx
         """.trimIndent()
+
+        val userPrompt = buildString {
+            appendLine("Convert the following documentation into a 4-scene animated online show mixing 3D models, 2D pixel sprites, textures, and console/handheld pipelines.")
+            appendLine(consoleConstraint)
+            if (contextBlock.isNotBlank()) {
+                appendLine()
+                appendLine(contextBlock)
+            }
+            appendLine()
+            appendLine("Documentation Input:")
+            appendLine(docText)
+        }
 
         viewModelScope.launch {
             _docToShowState.value = DocToShowUiState.Generating
             try {
-                val response = withTimeout(60_000L) {
-                    structuredShowModel.generateContent(prompt)
+                val aiResponse = withTimeout(60_000L) {
+                    omniAiRouter.generateText(
+                        request = AiTextRequest(
+                            prompt = userPrompt,
+                            systemInstruction = systemPrompt,
+                            requireJson = true,
+                            maxTokens = 2400
+                        ),
+                        firebaseResponseSchema = showGenerationSchema
+                    )
                 }
-                val jsonString = response.text
-                    ?: throw IllegalStateException("Model returned an empty JSON response.")
 
-                val json = JSONObject(jsonString)
+                val cleanJson = OmniAiRouter.extractRawJsonObject(aiResponse.text)
+                val json = JSONObject(cleanJson)
                 val showTitle = json.getString("showTitle")
                 val showSubtitle = json.optString("showSubtitle", "AI-Directed Hybrid 2D/3D Online Show")
                 val scenesArray = json.getJSONArray("scenes")
@@ -421,12 +618,15 @@ class ChronoStageViewModel(
                 )
                 val newId = repository.saveShow(newProject)
                 _activeShow.value = newProject.copy(id = newId)
+                _aiCustomBitmap.value = null
                 _selectedSceneIndex.value = 0
                 _sceneProgressFloat.value = 0f
                 _consoleOverrideId.value = null
                 _isPlaying.value = true
+
+                val fallbackNote = if (aiResponse.fallbackUsed) " (Fallback)" else ""
                 _docToShowState.value = DocToShowUiState.Success(
-                    "Generated '$showTitle' with ${parsedScenes.size} hybrid 2D/3D scenes!"
+                    "Generated '$showTitle' (${parsedScenes.size} scenes) via ${aiResponse.providerUsed.shortBadge}$fallbackNote!"
                 )
             } catch (e: TimeoutCancellationException) {
                 Log.e(TAG, "Show generation timed out", e)
@@ -445,7 +645,7 @@ class ChronoStageViewModel(
     }
 
     /**
-     * Streaming AI Director Notes & Show Choreography Analysis (generateContentStream)
+     * Streaming AI Director Notes routed through OmniAiRouter + MultiSourceContextRegistry.
      */
     fun streamAiDirectorNotes() {
         val docText = _documentationInput.value.trim()
@@ -454,21 +654,27 @@ class ChronoStageViewModel(
             return
         }
 
-        val prompt = """
-            You are an expert Online Show Animation Director specializing in hybrid 2D sprite + 3D model choreography across retro and modern game consoles and handhelds (NES, Game Boy DMG, SNES Super FX, PS1, N64, GBA, Nintendo DS, Dreamcast, PSP/Vita, Switch HD-2D).
-            Provide a concise, high-impact 4-bullet visual direction breakdown for turning this documentation into an unforgettable animated online episode (covering camera transitions, 2D sprite vs 3D mesh contrast, and hardware shader transitions):
-
-            $docText
-        """.trimIndent()
+        val contextBlock = contextRegistry.assembleContextBlock(
+            liveShowContext = buildLiveShowContextSummary()
+        )
+        val prompt = buildString {
+            appendLine("You are an expert Online Show Animation Director specializing in hybrid 2D sprite + 3D model choreography across retro and modern game consoles and handhelds.")
+            appendLine("Provide a concise, high-impact 4-bullet visual direction breakdown for turning this documentation into an unforgettable animated online episode:")
+            if (contextBlock.isNotBlank()) {
+                appendLine()
+                appendLine(contextBlock)
+            }
+            appendLine()
+            appendLine(docText)
+        }
 
         viewModelScope.launch {
             _directorStreamState.value = DirectorStreamState.Loading
             val accumulated = StringBuilder()
             try {
                 withTimeout(60_000L) {
-                    directorStreamModel.generateContentStream(prompt).collect { chunk ->
-                        val text = chunk.text.orEmpty()
-                        accumulated.append(text)
+                    omniAiRouter.streamText(AiTextRequest(prompt = prompt)).collect { (chunkText, _) ->
+                        accumulated.append(chunkText)
                         _directorStreamState.value = DirectorStreamState.Streaming(accumulated.toString())
                     }
                 }
@@ -492,7 +698,7 @@ class ChronoStageViewModel(
     }
 
     /**
-     * Runtime AI Texture & Sprite Sheet Synthesis using Gemini Nano Banana 2.1
+     * Runtime AI Texture & Sprite Sheet Synthesis routed via OmniAiRouter and persisted to disk.
      */
     fun generateRuntimeTextureOrSprite() {
         val prompt = _texturePromptInput.value.trim()
@@ -504,22 +710,33 @@ class ChronoStageViewModel(
         viewModelScope.launch {
             _textureGenState.value = TextureGenUiState.Loading
             try {
-                val bitmap = withTimeout(60_000L) {
-                    val response = nanoBananaImageModel.generateContent(prompt)
-                    response.candidates.firstOrNull()
-                        ?.content?.parts?.filterIsInstance<ImagePart>()
-                        ?.firstOrNull()?.image
+                val imgResp = withTimeout(60_000L) {
+                    omniAiRouter.generateImage(AiImageRequest(prompt = prompt))
                 }
-                if (bitmap != null) {
-                    _aiCustomBitmap.value = bitmap
-                    _textureGenState.value = TextureGenUiState.Success(bitmap, prompt)
-                    // Automatically apply the AI_CUSTOM_BITMAP texture preset to the active scene
-                    updateCurrentSceneConfig { scene ->
-                        scene.copy(texturePreset = TexturePreset.AI_CUSTOM_BITMAP)
-                    }
+                val bitmap = imgResp.bitmap
+                _aiCustomBitmap.value = bitmap
+                updateCurrentSceneConfig { scene ->
+                    scene.copy(texturePreset = TexturePreset.AI_CUSTOM_BITMAP)
+                }
+
+                // Persist show + custom texture immediately to filesDir/show_textures/<showId>.png
+                val currentShow = _activeShow.value
+                val persistedId = if (currentShow.id > 0L) {
+                    repository.saveShow(currentShow, bitmap)
                 } else {
-                    _textureGenState.value = TextureGenUiState.Error("No image was returned by the model.")
+                    repository.saveShow(currentShow, bitmap).also { newId ->
+                        _activeShow.value = currentShow.copy(id = newId)
+                    }
                 }
+                if (persistedId > 0L && _activeShow.value.id != persistedId) {
+                    _activeShow.value = _activeShow.value.copy(id = persistedId)
+                }
+
+                val fallbackSuffix = if (imgResp.fallbackUsed) " (Fallback)" else ""
+                _textureGenState.value = TextureGenUiState.Success(
+                    bitmap = bitmap,
+                    promptUsed = "$prompt — via ${imgResp.providerUsed.shortBadge}$fallbackSuffix (Saved to Disk)"
+                )
             } catch (e: TimeoutCancellationException) {
                 Log.e(TAG, "AI texture generation timed out", e)
                 _textureGenState.value = TextureGenUiState.Error("Image generation timed out after 60 seconds.")
@@ -535,8 +752,15 @@ class ChronoStageViewModel(
     }
 
     companion object {
-        fun provideFactory(repository: ShowRepository): ViewModelProvider.Factory = viewModelFactory {
-            initializer { ChronoStageViewModel(repository) }
+        fun provideFactory(
+            repository: ShowRepository,
+            keyVault: SecureAiKeyVault,
+            contextRegistry: MultiSourceContextRegistry,
+            omniAiRouter: OmniAiRouter
+        ): ViewModelProvider.Factory = viewModelFactory {
+            initializer {
+                ChronoStageViewModel(repository, keyVault, contextRegistry, omniAiRouter)
+            }
         }
     }
 }

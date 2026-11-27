@@ -68,7 +68,10 @@ abstract class ShowDatabase : RoomDatabase() {
     }
 }
 
-class ShowRepository(private val showDao: ShowDao) {
+class ShowRepository(
+    private val showDao: ShowDao,
+    private val textureStore: ShowTextureStore? = null
+) {
 
     val allShows: Flow<List<ShowProject>> = showDao.observeAllShows().map { list ->
         list.map { it.toDomain() }
@@ -82,12 +85,28 @@ class ShowRepository(private val showDao: ShowDao) {
         }
     }
 
-    suspend fun saveShow(project: ShowProject): Long {
-        return showDao.insertShow(project.toEntity())
+    suspend fun saveShow(project: ShowProject, customTexture: android.graphics.Bitmap? = null): Long {
+        val savedId = showDao.insertShow(project.toEntity())
+        if (customTexture != null && textureStore != null && savedId > 0L) {
+            textureStore.saveTexture(savedId, customTexture)
+        }
+        return savedId
+    }
+
+    suspend fun saveShowTexture(showId: Long, bitmap: android.graphics.Bitmap) {
+        if (showId > 0L) {
+            textureStore?.saveTexture(showId, bitmap)
+        }
+    }
+
+    suspend fun loadShowTexture(showId: Long): android.graphics.Bitmap? {
+        if (showId <= 0L) return null
+        return textureStore?.loadTexture(showId)
     }
 
     suspend fun deleteShow(id: Long) {
         showDao.deleteShowById(id)
+        textureStore?.deleteTexture(id)
     }
 
     private fun ShowProject.toEntity(): ShowProjectEntity {
